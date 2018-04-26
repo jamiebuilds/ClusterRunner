@@ -1,5 +1,6 @@
 from enum import Enum
 from queue import Queue
+import http.client
 import sys
 import sched
 import time
@@ -74,24 +75,36 @@ class ClusterSlave(ClusterService):
 
     def _run_heartbeat(self):
         try:
-            self._send_heartbeat_to_master()
-            self._heartbeat_failure_count = 0
-        except (requests.ConnectionError, requests.Timeout):
-            self._heartbeat_failure_count += 1
-            if self._heartbeat_failure_count >= self._heartbeat_failure_threshold:
-                self._logger.error('Master is not responding to heartbeats')
+            response = self._send_heartbeat_to_master()
 
-                # TODO: Right now the slave simply dies when it does not hear back from master. The next step would
-                # be to try to reconnect to master at this point. In future the heartbeat and connect_to_master
-                # methods can combined into one. This combined method will behave differently based on current state.
-                self.kill()
+            # A non HTTP 200 response indicates that the master is up, but does not recognize the slave.
+            # The slave tries to reconnect to master at this point.
+            # This is also counted as a heartbeat failure and the slave takes an action accordingly
+            if response.status_code != http.client.OK:
+                self._act_on_heartbeat_failure()
+                self._logger.info('Master responded with {}. Attempting to reconnect.'.format(response.status_code))
+                self.connect_to_master(self._master_url)
+            else:
+                self._heartbeat_failure_count = 0
+        except (requests.ConnectionError, requests.Timeout):
+            self._act_on_heartbeat_failure()
 
         self._hb_scheduler.enter(self._heartbeat_interval, 0, self._run_heartbeat)
 
+    def _act_on_heartbeat_failure(self):
+        self._heartbeat_failure_count += 1
+        if self._heartbeat_failure_count >= self._heartbeat_failure_threshold:
+            self._logger.error('Master is not responding to heartbeats')
+
+            # TODO: Right now the slave simply dies when it does not hear back from master. The next step would
+            # be to try to reconnect to master at this point. In future the heartbeat and connect_to_master
+            # methods can combined into one. This combined method will behave differently based on current state.
+            self.kill()
+
     def _send_heartbeat_to_master(self):
         heartbeat_url = self._master_api.url('slave', self._slave_id, 'heartbeat')
-        self._network.post_with_digest(heartbeat_url, request_params={'slave': {'heartbeat': True}},
-                                       secret=Secret.get())
+        return self._network.post_with_digest(heartbeat_url, request_params={'slave': {'heartbeat': True}},
+                                              secret=Secret.get())
 
     def api_representation(self):
         """

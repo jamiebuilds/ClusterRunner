@@ -272,6 +272,23 @@ class TestClusterSlave(BaseUnitTestCase):
                 self.assertEqual(self._mock_sys.exit.call_count, 0,
                                  'slave keeps running when heartbeat failure threshold is not reached')
 
+    def test_heartbeat_reconnects_to_master_on_http_404(self):
+        expected_slave_connect_url = 'http://{}/v1/slave'.format(self._FAKE_MASTER_URL)
+        expected_slave_heartbeat_url = expected_slave_connect_url + '/1/heartbeat'
+
+        slave = self._create_cluster_slave()
+        slave.connect_to_master(self._FAKE_MASTER_URL)
+        mock_response = MagicMock(spec=requests.models.Response, create=True)
+        mock_response.status_code = http.client.NOT_FOUND
+        self.mock_network.post_with_digest.return_value = mock_response
+
+        slave._run_heartbeat()
+
+        self.mock_network.post_with_digest.assert_called_once_with(
+            expected_slave_heartbeat_url,request_params={'slave': {'heartbeat': True}}, secret=ANY)
+        self.assertEqual(self.mock_network.post.call_count, 2)
+        self.assertEqual(self.mock_network.post.call_args, call(expected_slave_connect_url, data=ANY))
+
     def _create_cluster_slave(self, **kwargs):
         """
         Create a ClusterSlave for testing.
